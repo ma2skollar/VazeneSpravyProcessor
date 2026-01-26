@@ -5,7 +5,7 @@ import time
 import urllib.request
 import urllib.error
 
-app = modal.App("vazene-spravy-processor")
+app = modal.App("vazenespravy-processor")
 auth_secret = modal.Secret.from_name("vazene-spravy-api-key")
 ollama_volume = modal.Volume.from_name("ollama-models", create_if_missing=True)
 
@@ -72,7 +72,7 @@ def classify(data: dict):
     Body: {"text": "...", "language": "sk"}
     Returns: {"politicalBias": "liberal" | "center" | "conservative"}
     """
-    from fastapi import HTTPException
+    from fastapi import HTTPException # type: ignore
 
     text = data.get("text", "")
     language = data.get("language", "sk")
@@ -97,7 +97,7 @@ def classify(data: dict):
 )
 def download_models():
     """Pre-download models. Run once: modal run modal_app.py::download_models"""
-    import ollama
+    import ollama # type: ignore
 
     start_ollama()
 
