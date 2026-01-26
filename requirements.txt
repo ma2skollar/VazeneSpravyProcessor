@@ -1,0 +1,5 @@
+modal>=0.64.0
+ollama>=0.4.0
+numpy>=1.26
+scikit-learn>=1.4,<1.6
+joblib>=1.3
