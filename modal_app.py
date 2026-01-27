@@ -5,6 +5,7 @@ import time
 import urllib.request
 import urllib.error
 from difflib import get_close_matches
+from fastapi import Header
 
 app = modal.App("vazenespravy-processor")
 secret = modal.Secret.from_name("vazenespravy")
@@ -135,7 +136,7 @@ def classify_llama(text: str, language: str) -> int:
     timeout=360,
 )
 @modal.fastapi_endpoint(method="POST")
-async def analyze(data: dict, authorization: str = ""):
+async def analyze(data: dict, authorization: str = Header(default="")):
     """
     Classify text for political bias.
 
