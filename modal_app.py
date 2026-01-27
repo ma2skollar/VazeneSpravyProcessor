@@ -93,7 +93,7 @@ def classify_with_model(model: str, text: str, prompt: str) -> int:
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
-    timeout=120,
+    timeout=300,
     scaledown_window=300,
 )
 def classify_gemma(text: str, language: str) -> int:
@@ -106,7 +106,7 @@ def classify_gemma(text: str, language: str) -> int:
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
-    timeout=120,
+    timeout=300,
     scaledown_window=300,
 )
 def classify_qwen(text: str, language: str) -> int:
@@ -119,7 +119,7 @@ def classify_qwen(text: str, language: str) -> int:
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
-    timeout=120,
+    timeout=300,
     scaledown_window=300,
 )
 def classify_llama(text: str, language: str) -> int:
@@ -132,7 +132,7 @@ def classify_llama(text: str, language: str) -> int:
 @app.function(
     image=image,
     secrets=[auth_secret],
-    timeout=180,
+    timeout=360,
 )
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict):

@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - develop
 
 jobs:
-  deploy:
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +20,27 @@ jobs:
       - name: Install Modal
         run: pip install modal
 
-      - name: Deploy to Modal
+      - name: Deploy to Modal (prod)
         run: modal deploy modal_app.py
         env:
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID_PROD }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET_PROD }}
+
+  deploy-test:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal
+        run: pip install modal
+
+      - name: Deploy to Modal (test)
+        run: modal deploy modal_app.py
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID_TEST }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET_TEST }}
