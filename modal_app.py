@@ -5,7 +5,12 @@ import time
 import urllib.request
 import urllib.error
 from difflib import get_close_matches
-from fastapi import Header
+try:
+    from fastapi import Header
+except ImportError:
+    # Placeholder for local parsing during deployment
+    def Header(default=""):
+        return default
 
 app = modal.App("vazenespravy-processor")
 secret = modal.Secret.from_name("vazenespravy")
