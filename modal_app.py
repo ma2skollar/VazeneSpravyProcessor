@@ -33,7 +33,7 @@ PROMPTS = {
 
 BIASES = ["conservative", "liberal", "neutral"]
 BIAS_TO_NUM = {"liberal": -1, "neutral": 0, "conservative": 1}
-NUM_TO_BIAS = {-1: "liberal", 0: "center", 1: "conservative"}
+NUM_TO_BIAS = {-1: "liberal", 0: "neutral", 1: "conservative"}
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -141,7 +141,7 @@ async def analyze(data: dict):
 
     Headers: Authorization: Bearer <api-key>
     Body: {"text": "...", "language": "sk"}
-    Returns: {"politicalBias": "liberal" | "center" | "conservative"}
+    Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
     """
     from fastapi import HTTPException  # type: ignore
     import numpy as np
