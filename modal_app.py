@@ -7,7 +7,7 @@ import urllib.error
 from difflib import get_close_matches
 
 app = modal.App("vazenespravy-processor")
-auth_secret = modal.Secret.from_name("vazene-spravy-api-key")
+secret = modal.Secret.from_name("vazenespravy")
 ollama_volume = modal.Volume.from_name("ollama-models", create_if_missing=True)
 
 PROMPTS = {
@@ -39,7 +39,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("curl", "ca-certificates", "zstd")
     .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
-    .pip_install("ollama>=0.4.0", "numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3", "fastapi[standard]")
+    .pip_install("ollama>=0.4.0", "numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3", "fastapi[standard]", "requests>=2.31")
     .env({"OLLAMA_MODELS": "/vol/ollama"})
     .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
 )
@@ -131,46 +131,84 @@ def classify_llama(text: str, language: str) -> int:
 # Main endpoint - no GPU needed, just orchestrates the 3 model calls
 @app.function(
     image=image,
-    secrets=[auth_secret],
+    secrets=[secret],
     timeout=360,
 )
 @modal.fastapi_endpoint(method="POST")
-async def analyze(data: dict):
+async def analyze(data: dict, authorization: str = ""):
     """
     Classify text for political bias.
 
     Headers: Authorization: Bearer <api-key>
-    Body: {"text": "...", "language": "sk"}
+    Body: {"text": "...", "language": "sk", "jobId": "...", "webhookUrl": "..."}
     Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
     """
     from fastapi import HTTPException  # type: ignore
     import numpy as np
     from joblib import load
+    import requests
+
+    # Validate API key
+    expected_key = os.environ.get("API_KEY", "")
+    provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    if not expected_key or provided_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     text = data.get("text", "")
     language = data.get("language", "sk")
+    job_id = data.get("jobId")
+    webhook_url = data.get("webhookUrl")
 
     if not text:
         raise HTTPException(status_code=400, detail="Missing 'text' field")
 
-    # Call all 3 models in parallel
-    gemma_result = classify_gemma.spawn(text, language)
-    qwen_result = classify_qwen.spawn(text, language)
-    llama_result = classify_llama.spawn(text, language)
+    success = True
+    result = None
 
-    # Wait for all results
-    results = [
-        gemma_result.get(),
-        qwen_result.get(),
-        llama_result.get(),
-    ]
+    try:
+        # Call all 3 models in parallel
+        gemma_result = classify_gemma.spawn(text, language)
+        qwen_result = classify_qwen.spawn(text, language)
+        llama_result = classify_llama.spawn(text, language)
 
-    # Load logistic regression model and predict
-    lr_model = load("/app/logistic_model.joblib")
-    predictions = np.array([results])
-    label = lr_model.predict(predictions)[0]
+        # Wait for all results
+        results = [
+            gemma_result.get(),
+            qwen_result.get(),
+            llama_result.get(),
+        ]
 
-    return {"politicalBias": NUM_TO_BIAS[label]}
+        # Load logistic regression model and predict
+        lr_model = load("/app/logistic_model.joblib")
+        predictions = np.array([results])
+        label = lr_model.predict(predictions)[0]
+        result = NUM_TO_BIAS[label]
+    except Exception as e:
+        success = False
+        result = str(e)
+
+    # Call webhook if provided
+    if webhook_url and job_id:
+        webhook_auth = os.environ.get("WEBHOOK_SECRET", "")
+        try:
+            requests.post(
+                webhook_url,
+                json={
+                    "jobId": job_id,
+                    "success": success,
+                    "politicalBias": result if success else None,
+                    "error": result if not success else None,
+                },
+                headers={"Authorization": f"Bearer {webhook_auth}"},
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"Failed to call webhook: {e}")
+
+    if not success:
+        raise HTTPException(status_code=500, detail=result)
+
+    return {"politicalBias": result}
 
 
 @app.function(
