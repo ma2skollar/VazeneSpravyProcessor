@@ -108,7 +108,7 @@ def start_ollama():
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=180,
+    container_idle_timeout=180,  # Modal 1.0: previously scaledown_window
 )
 class GemmaClassifier:
     @modal.enter()
@@ -155,7 +155,7 @@ class GemmaClassifier:
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=180,
+    container_idle_timeout=180,
 )
 class QwenClassifier:
     @modal.enter()
@@ -198,7 +198,7 @@ class QwenClassifier:
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=180,
+    container_idle_timeout=180,
 )
 class LlamaClassifier:
     @modal.enter()
@@ -236,71 +236,75 @@ class LlamaClassifier:
             self.ollama_process.terminate()
 
 
-# Main endpoint - preload logistic regression model
-@app.cls(
+# Global variable to cache the logistic regression model
+_lr_model = None
+
+
+def get_lr_model():
+    """Load logistic regression model once and cache it."""
+    global _lr_model
+    if _lr_model is None:
+        from joblib import load # type: ignore
+        print("Loading logistic regression model...")
+        _lr_model = load("/app/logistic_model.joblib")
+        print("Logistic regression model loaded")
+    return _lr_model
+
+
+# Main endpoint - maintains original URL
+@app.function(
     image=image,
     secrets=[secret],
     timeout=360,
-    scaledown_window=300,
-    # uncomment for permanent cpu
-    # min_containers=1,
+    container_idle_timeout=300,
+    min_containers=1,  # Keep 1 endpoint container always warm (no GPU, minimal cost)
 )
-class AnalysisEndpoint:
-    @modal.enter()
-    def startup(self):
-        """Preload the logistic regression model."""
-        from joblib import load  # type: ignore
-        
-        print("Loading logistic regression model...")
-        self.lr_model = load("/app/logistic_model.joblib")
-        
-        # Initialize classifier instances
-        self.gemma = GemmaClassifier()
-        self.qwen = QwenClassifier()
-        self.llama = LlamaClassifier()
-        print("Analysis endpoint ready")
+@modal.fastapi_endpoint(method="POST")
+async def analyze(data: dict, authorization: str = Header(default="")):
+    """
+    Classify text for political bias.
 
-    @modal.fastapi_endpoint(method="POST")
-    async def analyze(self, data: dict, authorization: str = Header(default="")):
-        """
-        Classify text for political bias.
+    Headers: Authorization: Bearer <api-key>
+    Body: {"text": "...", "language": "sk"}
+    Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
+    """
+    from fastapi import HTTPException  # type: ignore
+    import numpy as np  # type: ignore
 
-        Headers: Authorization: Bearer <api-key>
-        Body: {"text": "...", "language": "sk"}
-        Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
-        """
-        from fastapi import HTTPException  # type: ignore
-        import numpy as np  # type: ignore
+    # Validate API key
+    expected_key = os.environ.get("API_KEY", "")
+    provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+    if not expected_key or provided_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-        # Validate API key
-        expected_key = os.environ.get("API_KEY", "")
-        provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-        if not expected_key or provided_key != expected_key:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    text = data.get("text", "")
+    language = data.get("language", "sk")
 
-        text = data.get("text", "")
-        language = data.get("language", "sk")
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text' field")
 
-        if not text:
-            raise HTTPException(status_code=400, detail="Missing 'text' field")
+    # Call all 3 models in parallel - these spawn remote GPU containers
+    gemma_classifier = GemmaClassifier()
+    qwen_classifier = QwenClassifier()
+    llama_classifier = LlamaClassifier()
+    
+    gemma_result = gemma_classifier.classify.spawn(text, language)
+    qwen_result = qwen_classifier.classify.spawn(text, language)
+    llama_result = llama_classifier.classify.spawn(text, language)
 
-        # Call all 3 models in parallel using the class instances
-        gemma_result = self.gemma.classify.spawn(text, language)
-        qwen_result = self.qwen.classify.spawn(text, language)
-        llama_result = self.llama.classify.spawn(text, language)
+    # Wait for all results
+    results = [
+        gemma_result.get(),
+        qwen_result.get(),
+        llama_result.get(),
+    ]
 
-        # Wait for all results
-        results = [
-            gemma_result.get(),
-            qwen_result.get(),
-            llama_result.get(),
-        ]
+    # Use cached logistic regression model to predict
+    lr_model = get_lr_model()
+    predictions = np.array([results])
+    label = lr_model.predict(predictions)[0]
 
-        # Use preloaded model to predict
-        predictions = np.array([results])
-        label = self.lr_model.predict(predictions)[0]
-
-        return {"politicalBias": NUM_TO_BIAS[label]}
+    return {"politicalBias": NUM_TO_BIAS[label]}
 
 
 @app.function(
