@@ -5,10 +5,10 @@ import time
 import urllib.request
 import urllib.error
 from difflib import get_close_matches
+
 try:
-    from fastapi import Header # type: ignore
+    from fastapi import Header  # type: ignore
 except ImportError:
-    # Placeholder for local parsing during deployment
     def Header(default=""):
         return default
 
@@ -41,148 +41,263 @@ BIASES = ["conservative", "liberal", "neutral"]
 BIAS_TO_NUM = {"liberal": -1, "neutral": 0, "conservative": 1}
 NUM_TO_BIAS = {-1: "liberal", 0: "neutral", 1: "conservative"}
 
+# OPTIMIZATION 1: Layer caching - build from least to most frequently changing
+# OPTIMIZATION 2: Lighter base image - debian_slim is already good
+# OPTIMIZATION 3: Prebuild all dependencies
+# OPTIMIZATION 4: Compile Python code
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    # Layer 1: System dependencies (rarely change)
     .apt_install("curl", "ca-certificates", "zstd")
+    # Layer 2: Install Ollama (rarely changes)
     .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
-    .pip_install("ollama>=0.4.0", "numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3", "fastapi[standard]")
+    # Layer 3: Python dependencies (change occasionally)
+    # OPTIMIZATION 3: Minimize dependencies - only install what's needed
+    .pip_install(
+        "ollama==0.4.4",  # Pin exact versions for reproducibility
+        "numpy==1.26.4",
+        "scikit-learn==1.3.1",
+        "joblib==1.3.2",
+        "fastapi==0.115.6",
+        "uvicorn[standard]==0.32.1",
+    )
+    # Layer 4: Environment variables
     .env({"OLLAMA_MODELS": "/vol/ollama"})
+    # Layer 5: Application files (change most frequently - put last)
     .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
+    # OPTIMIZATION 4: Compile Python files
+    .run_commands(
+        "python -m compileall -b /usr/local/lib/python3.11/site-packages || true",
+        "find /usr/local/lib/python3.11/site-packages -name '*.py' -delete || true"
+    )
 )
-
-ollama_process = None
 
 
 def start_ollama():
     """Start Ollama server and wait for it to be ready."""
-    global ollama_process
-    if ollama_process is not None:
-        return
-
     print("Starting Ollama server...")
     env = os.environ.copy()
     env["OLLAMA_MODELS"] = "/vol/ollama"
 
-    ollama_process = subprocess.Popen(
+    process = subprocess.Popen(
         ["ollama", "serve"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
-    for i in range(60):
+    # Reduced timeout since models are preloaded
+    for i in range(30):
         try:
             urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2)
             print(f"Ollama ready after {i+1}s")
-            return
+            return process
         except (urllib.error.URLError, ConnectionRefusedError, TimeoutError, OSError):
             time.sleep(1)
 
-    if ollama_process.poll() is not None:
-        _, stderr = ollama_process.communicate()
+    if process.poll() is not None:
+        _, stderr = process.communicate()
         raise RuntimeError(f"Ollama crashed: {stderr.decode()}")
-    raise RuntimeError("Ollama failed to start within 60s")
+    raise RuntimeError("Ollama failed to start within 30s")
 
 
-def classify_with_model(model: str, text: str, prompt: str) -> int:
-    """Run classification with a specific model."""
-    import ollama  # type: ignore
-
-    result = ollama.generate(model=model, prompt=prompt + text, options={"temperature": 0.1})
-    response = result["response"].split("</think>")[-1].strip().lower()
-    matches = get_close_matches(response, BIASES, n=1)
-    return BIAS_TO_NUM[matches[0]] if matches else 0
-
-
-# Individual model functions - each gets its own T4 GPU
-@app.function(
+# OPTIMIZATION 5: Model preloading using modal.Cls with @enter()
+@app.cls(
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
 )
-def classify_gemma(text: str, language: str) -> int:
-    start_ollama()
-    prompt = PROMPTS.get(language, PROMPTS["en"])
-    return classify_with_model("gemma3:12b", text, prompt)
+class GemmaClassifier:
+    @modal.enter()
+    def startup(self):
+        """Runs once on container start - preload everything here."""
+        import ollama  # type: ignore
+        
+        print("Initializing Gemma classifier...")
+        self.ollama_process = start_ollama()
+        
+        # Verify model is available
+        models = ollama.list()
+        model_names = [m["name"] for m in models.get("models", [])]
+        if "gemma3:12b" not in model_names:
+            print("WARNING: gemma3:12b not found in cache, will be slow on first run")
+        
+        self.model_name = "gemma3:12b"
+        print("Gemma classifier ready")
+
+    @modal.method()
+    def classify(self, text: str, language: str) -> int:
+        """Classification method - model already loaded."""
+        import ollama  # type: ignore
+        
+        prompt = PROMPTS.get(language, PROMPTS["en"])
+        result = ollama.generate(
+            model=self.model_name,
+            prompt=prompt + text,
+            options={"temperature": 0.1}
+        )
+        response = result["response"].split("</think>")[-1].strip().lower()
+        matches = get_close_matches(response, BIASES, n=1)
+        return BIAS_TO_NUM[matches[0]] if matches else 0
+
+    @modal.exit()
+    def shutdown(self):
+        """Cleanup on container shutdown."""
+        if hasattr(self, 'ollama_process') and self.ollama_process:
+            self.ollama_process.terminate()
 
 
-@app.function(
+@app.cls(
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
 )
-def classify_qwen(text: str, language: str) -> int:
-    start_ollama()
-    prompt = PROMPTS.get(language, PROMPTS["en"])
-    return classify_with_model("qwen3:8b", text, prompt)
+class QwenClassifier:
+    @modal.enter()
+    def startup(self):
+        import ollama  # type: ignore
+        
+        print("Initializing Qwen classifier...")
+        self.ollama_process = start_ollama()
+        
+        models = ollama.list()
+        model_names = [m["name"] for m in models.get("models", [])]
+        if "qwen3:8b" not in model_names:
+            print("WARNING: qwen3:8b not found in cache")
+        
+        self.model_name = "qwen3:8b"
+        print("Qwen classifier ready")
+
+    @modal.method()
+    def classify(self, text: str, language: str) -> int:
+        import ollama  # type: ignore
+        
+        prompt = PROMPTS.get(language, PROMPTS["en"])
+        result = ollama.generate(
+            model=self.model_name,
+            prompt=prompt + text,
+            options={"temperature": 0.1}
+        )
+        response = result["response"].split("</think>")[-1].strip().lower()
+        matches = get_close_matches(response, BIASES, n=1)
+        return BIAS_TO_NUM[matches[0]] if matches else 0
+
+    @modal.exit()
+    def shutdown(self):
+        if hasattr(self, 'ollama_process') and self.ollama_process:
+            self.ollama_process.terminate()
 
 
-@app.function(
+@app.cls(
     image=image,
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
 )
-def classify_llama(text: str, language: str) -> int:
-    start_ollama()
-    prompt = PROMPTS.get(language, PROMPTS["en"])
-    return classify_with_model("llama3.1:8b", text, prompt)
+class LlamaClassifier:
+    @modal.enter()
+    def startup(self):
+        import ollama  # type: ignore
+        
+        print("Initializing Llama classifier...")
+        self.ollama_process = start_ollama()
+        
+        models = ollama.list()
+        model_names = [m["name"] for m in models.get("models", [])]
+        if "llama3.1:8b" not in model_names:
+            print("WARNING: llama3.1:8b not found in cache")
+        
+        self.model_name = "llama3.1:8b"
+        print("Llama classifier ready")
+
+    @modal.method()
+    def classify(self, text: str, language: str) -> int:
+        import ollama  # type: ignore
+        
+        prompt = PROMPTS.get(language, PROMPTS["en"])
+        result = ollama.generate(
+            model=self.model_name,
+            prompt=prompt + text,
+            options={"temperature": 0.1}
+        )
+        response = result["response"].split("</think>")[-1].strip().lower()
+        matches = get_close_matches(response, BIASES, n=1)
+        return BIAS_TO_NUM[matches[0]] if matches else 0
+
+    @modal.exit()
+    def shutdown(self):
+        if hasattr(self, 'ollama_process') and self.ollama_process:
+            self.ollama_process.terminate()
 
 
-# Main endpoint - no GPU needed, just orchestrates the 3 model calls
-@app.function(
+# Main endpoint - preload logistic regression model
+@app.cls(
     image=image,
     secrets=[secret],
     timeout=360,
+    keep_warm=1,
 )
-@modal.fastapi_endpoint(method="POST")
-async def analyze(data: dict, authorization: str = Header(default="")):
-    """
-    Classify text for political bias.
+class AnalysisEndpoint:
+    @modal.enter()
+    def startup(self):
+        """Preload the logistic regression model."""
+        from joblib import load  # type: ignore
+        
+        print("Loading logistic regression model...")
+        self.lr_model = load("/app/logistic_model.joblib")
+        
+        # Initialize classifier instances
+        self.gemma = GemmaClassifier()
+        self.qwen = QwenClassifier()
+        self.llama = LlamaClassifier()
+        print("Analysis endpoint ready")
 
-    Headers: Authorization: Bearer <api-key>
-    Body: {"text": "...", "language": "sk"}
-    Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
-    """
-    from fastapi import HTTPException  # type: ignore
-    import numpy as np # type: ignore
-    from joblib import load # type: ignore
+    @modal.fastapi_endpoint(method="POST")
+    async def analyze(self, data: dict, authorization: str = Header(default="")):
+        """
+        Classify text for political bias.
 
-    # Validate API key
-    expected_key = os.environ.get("API_KEY", "")
-    provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    if not expected_key or provided_key != expected_key:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        Headers: Authorization: Bearer <api-key>
+        Body: {"text": "...", "language": "sk"}
+        Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
+        """
+        from fastapi import HTTPException  # type: ignore
+        import numpy as np  # type: ignore
 
-    text = data.get("text", "")
-    language = data.get("language", "sk")
+        # Validate API key
+        expected_key = os.environ.get("API_KEY", "")
+        provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        if not expected_key or provided_key != expected_key:
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not text:
-        raise HTTPException(status_code=400, detail="Missing 'text' field")
+        text = data.get("text", "")
+        language = data.get("language", "sk")
 
-    # Call all 3 models in parallel
-    gemma_result = classify_gemma.spawn(text, language)
-    qwen_result = classify_qwen.spawn(text, language)
-    llama_result = classify_llama.spawn(text, language)
+        if not text:
+            raise HTTPException(status_code=400, detail="Missing 'text' field")
 
-    # Wait for all results
-    results = [
-        gemma_result.get(),
-        qwen_result.get(),
-        llama_result.get(),
-    ]
+        # Call all 3 models in parallel using the class instances
+        gemma_result = self.gemma.classify.spawn(text, language)
+        qwen_result = self.qwen.classify.spawn(text, language)
+        llama_result = self.llama.classify.spawn(text, language)
 
-    # Load logistic regression model and predict
-    lr_model = load("/app/logistic_model.joblib")
-    predictions = np.array([results])
-    label = lr_model.predict(predictions)[0]
+        # Wait for all results
+        results = [
+            gemma_result.get(),
+            qwen_result.get(),
+            llama_result.get(),
+        ]
 
-    return {"politicalBias": NUM_TO_BIAS[label]}
+        # Use preloaded model to predict
+        predictions = np.array([results])
+        label = self.lr_model.predict(predictions)[0]
+
+        return {"politicalBias": NUM_TO_BIAS[label]}
 
 
 @app.function(
@@ -191,10 +306,10 @@ async def analyze(data: dict, authorization: str = Header(default="")):
     timeout=1800,
 )
 def download_models():
-    """Pre-download models. Run once: modal run modal_app.py::download_models"""
+    """Pre-download models. Run once: modal run modal_app_optimized.py::download_models"""
     import ollama  # type: ignore
 
-    start_ollama()
+    process = start_ollama()
 
     for model in ["gemma3:12b", "qwen3:8b", "llama3.1:8b"]:
         print(f"Pulling {model}...")
@@ -202,7 +317,8 @@ def download_models():
         print(f"Done: {model}")
 
     ollama_volume.commit()
-    print("All models downloaded.")
+    process.terminate()
+    print("All models downloaded and committed to volume.")
 
 
 @app.local_entrypoint()
