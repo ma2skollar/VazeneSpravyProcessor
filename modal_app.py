@@ -61,15 +61,16 @@ image = (
         "fastapi==0.115.6",
         "uvicorn[standard]==0.32.1",
     )
-    # Layer 4: Environment variables
-    .env({"OLLAMA_MODELS": "/vol/ollama"})
-    # Layer 5: Application files (change most frequently - put last)
-    .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
-    # OPTIMIZATION 4: Compile Python files
+    # OPTIMIZATION 4: Compile Python files (do before adding local files)
     .run_commands(
         "python -m compileall -b /usr/local/lib/python3.11/site-packages || true",
         "find /usr/local/lib/python3.11/site-packages -name '*.py' -delete || true"
     )
+    # Layer 4: Environment variables
+    .env({"OLLAMA_MODELS": "/vol/ollama"})
+    # Layer 5: Application files (change most frequently - put LAST)
+    # copy=True allows running commands after, but adds to build time
+    .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib", copy=True)
 )
 
 
@@ -240,7 +241,9 @@ class LlamaClassifier:
     image=image,
     secrets=[secret],
     timeout=360,
-    keep_warm=1,
+    scaledown_window=300,
+    # uncomment for permanent cpu
+    # min_containers=1,
 )
 class AnalysisEndpoint:
     @modal.enter()
