@@ -49,8 +49,8 @@ gpu_image = (
     .apt_install("curl", "ca-certificates", "zstd")
     # Pinned ollama version for deterministic, cacheable layer
     .run_commands(
-        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tgz"
-        " | tar -xz -C /usr/local"
+        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
+        " | zstd -d | tar -x -C /usr/local"
     )
     .pip_install("ollama>=0.4.0")
     .env({
@@ -66,8 +66,8 @@ qwen_host_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("curl", "ca-certificates", "zstd")
     .run_commands(
-        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tgz"
-        " | tar -xz -C /usr/local"
+        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
+        " | zstd -d | tar -x -C /usr/local"
     )
     .pip_install("ollama>=0.4.0", "numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3")
     .pip_install("fastapi[standard]")
