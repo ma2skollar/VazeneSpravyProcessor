@@ -41,29 +41,42 @@ BIASES = ["conservative", "liberal", "neutral"]
 BIAS_TO_NUM = {"liberal": -1, "neutral": 0, "conservative": 1}
 NUM_TO_BIAS = {-1: "liberal", 0: "neutral", 1: "conservative"}
 
-# --- GPU worker image: only ollama + minimal Python deps ---
-# Layer 1: OS packages (rarely changes)
+OLLAMA_VERSION = "0.15.1"
+
+# --- GPU worker image: ollama + minimal Python deps ---
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("curl", "ca-certificates", "zstd")
-    .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
-    # Layer 2: Python deps (changes occasionally)
+    # Pinned ollama version for deterministic, cacheable layer
+    .run_commands(
+        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tgz"
+        " | tar -xz -C /usr/local"
+    )
     .pip_install("ollama>=0.4.0")
-    .env({"OLLAMA_MODELS": "/vol/ollama"})
-    # Layer 3: Compile all .pyc bytecode for faster startup
+    .env({
+        "OLLAMA_MODELS": "/vol/ollama",
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+    })
     .run_commands("python -m compileall -q /usr/local/lib/python3.11")
 )
 
-# --- Orchestrator image: no GPU, just fastapi + ML inference deps ---
-# Layer 1: Heavy scientific deps (rarely changes)
-orchestrator_image = (
+# --- Qwen host image: GPU image + orchestrator deps (fastapi, numpy, etc.) ---
+qwen_host_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3")
-    # Layer 2: Web framework (changes occasionally)
+    .apt_install("curl", "ca-certificates", "zstd")
+    .run_commands(
+        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tgz"
+        " | tar -xz -C /usr/local"
+    )
+    .pip_install("ollama>=0.4.0", "numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3")
     .pip_install("fastapi[standard]")
-    # Layer 3: Compile bytecode
+    .env({
+        "OLLAMA_MODELS": "/vol/ollama",
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+    })
     .run_commands("python -m compileall -q /usr/local/lib/python3.11")
-    # Layer 4: Application files (must be last - Modal mounts these at startup)
     .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
 )
 
@@ -111,7 +124,7 @@ def _classify(model: str, text: str, prompt: str) -> int:
     return BIAS_TO_NUM[matches[0]] if matches else 0
 
 
-# --- Class-based GPU workers with @enter() for model preloading ---
+# --- GPU workers ---
 
 @app.cls(
     image=gpu_image,
@@ -141,26 +154,6 @@ class GemmaClassifier:
     scaledown_window=180,
     max_containers=1,
 )
-class QwenClassifier:
-    @modal.enter()
-    def startup(self):
-        self.proc = _start_ollama()
-        _warmup_model("qwen3:8b")
-
-    @modal.method()
-    def classify(self, text: str, language: str) -> int:
-        prompt = PROMPTS.get(language, PROMPTS["en"])
-        return _classify("qwen3:8b", text, prompt)
-
-
-@app.cls(
-    image=gpu_image,
-    gpu="T4",
-    volumes={"/vol/ollama": ollama_volume},
-    timeout=300,
-    scaledown_window=180,
-    max_containers=1,
-)
 class LlamaClassifier:
     @modal.enter()
     def startup(self):
@@ -173,50 +166,64 @@ class LlamaClassifier:
         return _classify("llama3.1:8b", text, prompt)
 
 
-# --- Orchestrator endpoint: no GPU, just dispatches to model workers ---
+# --- Qwen host: runs qwen inference + serves the FastAPI endpoint + orchestrates ---
 
-@app.function(
-    image=orchestrator_image,
+@app.cls(
+    image=qwen_host_image,
+    gpu="T4",
     secrets=[secret],
+    volumes={"/vol/ollama": ollama_volume},
     timeout=360,
+    scaledown_window=180,
     max_containers=1,
 )
-@modal.fastapi_endpoint(method="POST")
-async def analyze(data: dict, authorization: str = Header(default="")):
-    """
-    Classify text for political bias.
+class QwenHost:
+    @modal.enter()
+    def startup(self):
+        self.proc = _start_ollama()
+        _warmup_model("qwen3:8b")
 
-    Headers: Authorization: Bearer <api-key>
-    Body: {"text": "...", "language": "sk"}
-    Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
-    """
-    from fastapi import HTTPException  # type: ignore
-    import numpy as np  # type: ignore
-    from joblib import load  # type: ignore
+    @modal.fastapi_endpoint(method="POST")
+    def analyze(self, data: dict, authorization: str = Header(default="")):
+        """
+        Classify text for political bias.
 
-    expected_key = os.environ.get("API_KEY", "")
-    provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    if not expected_key or provided_key != expected_key:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        Headers: Authorization: Bearer <api-key>
+        Body: {"text": "...", "language": "sk"}
+        Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
+        """
+        from fastapi import HTTPException  # type: ignore
+        import numpy as np  # type: ignore
+        from joblib import load  # type: ignore
 
-    text = data.get("text", "")
-    language = data.get("language", "sk")
+        expected_key = os.environ.get("API_KEY", "")
+        provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        if not expected_key or provided_key != expected_key:
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not text:
-        raise HTTPException(status_code=400, detail="Missing 'text' field")
+        text = data.get("text", "")
+        language = data.get("language", "sk")
 
-    # Spawn all 3 model calls in parallel
-    gemma = GemmaClassifier().classify.spawn(text, language)
-    qwen = QwenClassifier().classify.spawn(text, language)
-    llama = LlamaClassifier().classify.spawn(text, language)
+        if not text:
+            raise HTTPException(status_code=400, detail="Missing 'text' field")
 
-    results = [gemma.get(), qwen.get(), llama.get()]
+        prompt = PROMPTS.get(language, PROMPTS["en"])
 
-    lr_model = load("/app/logistic_model.joblib")
-    predictions = np.array([results])
-    label = lr_model.predict(predictions)[0]
+        # Spawn gemma + llama on their GPU containers in parallel
+        gemma = GemmaClassifier().classify.spawn(text, language)
+        llama = LlamaClassifier().classify.spawn(text, language)
 
-    return {"politicalBias": NUM_TO_BIAS[label]}
+        # Run qwen locally on this container (already loaded in VRAM)
+        qwen_result = _classify("qwen3:8b", text, prompt)
+
+        # Collect results
+        results = [gemma.get(), qwen_result, llama.get()]
+
+        lr_model = load("/app/logistic_model.joblib")
+        predictions = np.array([results])
+        label = lr_model.predict(predictions)[0]
+
+        return {"politicalBias": NUM_TO_BIAS[label]}
 
 
 @app.function(
