@@ -118,7 +118,8 @@ def _classify(model: str, text: str, prompt: str) -> int:
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
+    max_containers=1,
 )
 class GemmaClassifier:
     @modal.enter()
@@ -137,7 +138,8 @@ class GemmaClassifier:
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
+    max_containers=1,
 )
 class QwenClassifier:
     @modal.enter()
@@ -156,7 +158,8 @@ class QwenClassifier:
     gpu="T4",
     volumes={"/vol/ollama": ollama_volume},
     timeout=300,
-    scaledown_window=300,
+    scaledown_window=180,
+    max_containers=1,
 )
 class LlamaClassifier:
     @modal.enter()
@@ -176,6 +179,7 @@ class LlamaClassifier:
     image=orchestrator_image,
     secrets=[secret],
     timeout=360,
+    max_containers=1,
 )
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
