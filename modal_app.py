@@ -61,10 +61,10 @@ orchestrator_image = (
     .pip_install("numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3")
     # Layer 2: Web framework (changes occasionally)
     .pip_install("fastapi[standard]")
-    # Layer 3: Application files (changes frequently)
-    .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
-    # Layer 4: Compile bytecode
+    # Layer 3: Compile bytecode
     .run_commands("python -m compileall -q /usr/local/lib/python3.11")
+    # Layer 4: Application files (must be last - Modal mounts these at startup)
+    .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
 )
 
 
