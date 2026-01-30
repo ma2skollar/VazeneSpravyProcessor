@@ -45,7 +45,7 @@ NUM_TO_BIAS = {-1: "liberal", 0: "neutral", 1: "conservative"}
 # Layer 1: OS packages (rarely changes)
 gpu_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("curl", "ca-certificates")
+    .apt_install("curl", "ca-certificates", "zstd")
     .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
     # Layer 2: Python deps (changes occasionally)
     .pip_install("ollama>=0.4.0")
