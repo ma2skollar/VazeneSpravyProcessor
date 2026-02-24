@@ -95,7 +95,7 @@ class Analyzer:
             "zero-shot-classification",
             model="mlburnham/Political_DEBATE_large_v1.0",
             device=0 if torch.cuda.is_available() else -1,
-            model_kwargs={"local_files_only": True},
+            local_files_only=True,
         )
 
         print("Loading DeBERTa political leaning classifier...")
@@ -106,7 +106,7 @@ class Analyzer:
             device=0 if torch.cuda.is_available() else -1,
             truncation=True,
             max_length=256,
-            model_kwargs={"local_files_only": True},
+            local_files_only=True,
         )
 
         print("All models loaded successfully.")
