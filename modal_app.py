@@ -28,7 +28,7 @@ image = (
         "fastapi[standard]",
     )
     .run_commands("python -m spacy download xx_sent_ud_sm")
-    .env({"HF_HOME": "/vol/models"})
+    .env({"HF_HOME": "/vol/models", "HF_HUB_OFFLINE": "1"})
 )
 
 
@@ -84,10 +84,10 @@ class Analyzer:
 
         print("Loading NLLB translation model...")
         self.nllb_tokenizer = AutoTokenizer.from_pretrained(
-            "facebook/nllb-200-distilled-600M"
+            "facebook/nllb-200-distilled-600M", local_files_only=True
         )
         self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
-            "facebook/nllb-200-distilled-600M"
+            "facebook/nllb-200-distilled-600M", local_files_only=True
         ).to("cuda" if torch.cuda.is_available() else "cpu")
 
         print("Loading Political DEBATE politicalness classifier...")
@@ -95,6 +95,7 @@ class Analyzer:
             "zero-shot-classification",
             model="mlburnham/Political_DEBATE_large_v1.0",
             device=0 if torch.cuda.is_available() else -1,
+            model_kwargs={"local_files_only": True},
         )
 
         print("Loading DeBERTa political leaning classifier...")
@@ -105,6 +106,7 @@ class Analyzer:
             device=0 if torch.cuda.is_available() else -1,
             truncation=True,
             max_length=256,
+            model_kwargs={"local_files_only": True},
         )
 
         print("All models loaded successfully.")
