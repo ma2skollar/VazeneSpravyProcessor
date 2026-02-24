@@ -70,7 +70,6 @@ def download_models():
     image=image,
     gpu="T4",
     volumes={"/vol/models": models_volume},
-    secrets=[auth_secret],
     timeout=300,
     scaledown_window=180,
 )
@@ -195,35 +194,19 @@ class Analyzer:
         }
         return label_map.get(label, "center")
 
-    @modal.fastapi_endpoint(method="POST")
-    async def analyze(self, data: dict, authorization: str = Header(default="")):
+    @modal.method()
+    def process_text(self, text: str) -> dict:
         """
-        Classify text for political content and bias.
+        Process text for political content and bias classification.
 
-        Headers: Authorization: Bearer <api-key>
-        Body: {"text": "..."}
+        Args:
+            text: Input text to analyze
+
         Returns: {
             "politicalness": true/false,
             "axes": {"economic": "left|center|right"} or {}
         }
         """
-        from fastapi import HTTPException
-
-        # Validate authentication
-        expected_key = os.environ.get("API_KEY", "")
-        provided_key = (
-            authorization.replace("Bearer ", "")
-            if authorization.startswith("Bearer ")
-            else authorization
-        )
-        if not expected_key or provided_key != expected_key:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-
-        # Validate input
-        text = data.get("text", "")
-        if not text or not text.strip():
-            raise HTTPException(status_code=400, detail="Missing or empty 'text' field")
-
         # Step 1: Translate to English (always, even if already English)
         print("Translating text...")
         translated_text = self.translate(text)
@@ -243,6 +226,42 @@ class Analyzer:
             print(f"Economic axis: {economic_label}")
 
         return {"politicalness": is_political, "axes": axes}
+
+
+@app.function(secrets=[auth_secret])
+@modal.web_endpoint(method="POST")
+async def analyze(data: dict, authorization: str = Header(default="")):
+    """
+    Classify text for political content and bias.
+
+    Headers: Authorization: Bearer <api-key>
+    Body: {"text": "..."}
+    Returns: {
+        "politicalness": true/false,
+        "axes": {"economic": "left|center|right"} or {}
+    }
+    """
+    from fastapi import HTTPException
+
+    # Validate authentication
+    expected_key = os.environ.get("API_KEY", "")
+    provided_key = (
+        authorization.replace("Bearer ", "")
+        if authorization.startswith("Bearer ")
+        else authorization
+    )
+    if not expected_key or provided_key != expected_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Validate input
+    text = data.get("text", "")
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Missing or empty 'text' field")
+
+    # Process text using the Analyzer class
+    analyzer = Analyzer()
+    result = analyzer.process_text.remote(text)
+    return result
 
 
 @app.local_entrypoint()
