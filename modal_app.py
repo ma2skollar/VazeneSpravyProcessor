@@ -46,7 +46,7 @@ def download_models():
     )
 
     print("Downloading NLLB translation model...")
-    AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
+    AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M", use_fast=False)
     AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
 
     print("Downloading Political DEBATE politicalness classifier...")
@@ -84,7 +84,7 @@ class Analyzer:
 
         print("Loading NLLB translation model...")
         self.nllb_tokenizer = AutoTokenizer.from_pretrained(
-            "facebook/nllb-200-distilled-600M", local_files_only=True
+            "facebook/nllb-200-distilled-600M", local_files_only=True, use_fast=False
         )
         self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
             "facebook/nllb-200-distilled-600M", local_files_only=True
