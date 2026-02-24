@@ -56,7 +56,7 @@ def download_models():
     )
 
     print("Downloading DeBERTa political leaning classifier...")
-    AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
+    AutoTokenizer.from_pretrained("microsoft/deberta-v3-large", trust_remote_code=True)
     AutoModelForSequenceClassification.from_pretrained(
         "matous-volf/political-leaning-deberta-large"
     )
@@ -86,8 +86,16 @@ class Analyzer:
         self.nllb_tokenizer = AutoTokenizer.from_pretrained(
             "facebook/nllb-200-distilled-600M", local_files_only=True, use_fast=False
         )
-        self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
+        # Suppress tied weights warnings by loading with tie_word_embeddings config
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(
             "facebook/nllb-200-distilled-600M", local_files_only=True
+        )
+        config.tie_word_embeddings = False
+        self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
+            "facebook/nllb-200-distilled-600M",
+            local_files_only=True,
+            config=config
         ).to("cuda" if torch.cuda.is_available() else "cpu")
 
         print("Loading Political DEBATE politicalness classifier...")
@@ -143,9 +151,16 @@ class Analyzer:
 
             # Generate translation
             # Slovak: slk_Latn, English: eng_Latn
+            # Get the forced BOS token ID for English
+            try:
+                forced_bos_token_id = self.nllb_tokenizer.lang_code_to_id["eng_Latn"]
+            except (AttributeError, KeyError):
+                # Fallback: convert the language code token to ID
+                forced_bos_token_id = self.nllb_tokenizer.convert_tokens_to_ids("eng_Latn")
+
             translated_tokens = self.nllb_model.generate(
                 **inputs,
-                forced_bos_token_id=self.nllb_tokenizer.lang_code_to_id["eng_Latn"],
+                forced_bos_token_id=forced_bos_token_id,
                 max_length=512,
             )
 
