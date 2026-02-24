@@ -66,17 +66,11 @@ def download_models():
     print("All models downloaded and committed.")
 
 
-@app.cls(
-    image=image,
-    gpu="T4",
-    volumes={"/vol/models": models_volume},
-    timeout=300,
-    scaledown_window=180,
-)
 class Analyzer:
-    @modal.enter()
-    def load_models(self):
-        """Load all models into GPU memory at container start."""
+    """Analyzer class for loading models and processing text."""
+
+    def __init__(self):
+        """Load all models into GPU memory."""
         import torch
         from transformers import (
             AutoModelForSeq2SeqLM,
@@ -194,7 +188,6 @@ class Analyzer:
         }
         return label_map.get(label, "center")
 
-    @modal.method()
     def process_text(self, text: str) -> dict:
         """
         Process text for political content and bias classification.
@@ -228,7 +221,17 @@ class Analyzer:
         return {"politicalness": is_political, "axes": axes}
 
 
-@app.function(image=image, secrets=[auth_secret])
+# Global analyzer instance (loaded once per container)
+analyzer = None
+
+@app.function(
+    image=image,
+    gpu="T4",
+    volumes={"/vol/models": models_volume},
+    secrets=[auth_secret],
+    timeout=300,
+    scaledown_window=180,
+)
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
     """
@@ -258,9 +261,13 @@ async def analyze(data: dict, authorization: str = Header(default="")):
     if not text or not text.strip():
         raise HTTPException(status_code=400, detail="Missing or empty 'text' field")
 
-    # Process text using the Analyzer class
-    analyzer = Analyzer()
-    result = analyzer.process_text.remote(text)
+    # Lazy load analyzer on first request
+    global analyzer
+    if analyzer is None:
+        analyzer = Analyzer()
+
+    # Process text
+    result = analyzer.process_text(text)
     return result
 
 
