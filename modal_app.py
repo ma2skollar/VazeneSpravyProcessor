@@ -228,8 +228,8 @@ class Analyzer:
         return {"politicalness": is_political, "axes": axes}
 
 
-@app.function(secrets=[auth_secret])
-@modal.web_endpoint(method="POST")
+@app.function(image=image, secrets=[auth_secret])
+@modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
     """
     Classify text for political content and bias.
