@@ -1,249 +1,253 @@
 import modal
-import subprocess
 import os
-import time
-import urllib.request
-import urllib.error
-from difflib import get_close_matches
 
 try:
-    from fastapi import Header  # type: ignore
+    from fastapi import Header
 except ImportError:
+    # Fallback for local imports (fastapi only available in Modal container)
     def Header(default=""):
         return default
 
 app = modal.App("vazenespravy-processor")
-secret = modal.Secret.from_name("vazenespravy")
-ollama_volume = modal.Volume.from_name("ollama-models", create_if_missing=True)
 
-PROMPTS = {
-    "sk": (
-        "You are a highly talented Slovak journalist, and you want to classify articles as either liberal, "
-        "neutral, or conservative. In your responses, you can only list a single classification, "
-        "and cannot list any other words. For example, if you classify an article as politically neutral, "
-        "you will only say the word neutral. If you classify an article as liberal, you will only "
-        "say the word liberal. If you classify an article as conservative, you will also only say the word "
-        "conservative. Under no circumstances should you list more than a single classification in your "
-        "responses, or a single word other than the classification. Classify the following article:"
-    ),
-    "en": (
-        "You are a highly talented journalist, and you want to classify articles as either liberal, "
-        "neutral, or conservative. In your responses, you can only list a single classification, "
-        "and cannot list any other words. For example, if you classify an article as politically neutral, "
-        "you will only say the word neutral. If you classify an article as liberal, you will only "
-        "say the word liberal. If you classify an article as conservative, you will also only say the word "
-        "conservative. Under no circumstances should you list more than a single classification in your "
-        "responses, or a single word other than the classification. Classify the following article:"
-    ),
-}
+# Secret for API authentication
+auth_secret = modal.Secret.from_name("vazenespravy")
 
-BIASES = ["conservative", "liberal", "neutral"]
-BIAS_TO_NUM = {"liberal": -1, "neutral": 0, "conservative": 1}
-NUM_TO_BIAS = {-1: "liberal", 0: "neutral", 1: "conservative"}
+# Volume for storing HuggingFace model weights
+models_volume = modal.Volume.from_name("hf-models", create_if_missing=True)
 
-OLLAMA_VERSION = "0.15.1"
-
-# --- GPU worker image: ollama + minimal Python deps ---
-gpu_image = (
+# Image with all dependencies for transformer inference
+image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("curl", "ca-certificates", "zstd")
-    # Pinned ollama version for deterministic, cacheable layer
-    .run_commands(
-        f"curl -fsSL https://github.com/ollama/ollama/releases/download/v{OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
-        " | zstd -d | tar -x -C /usr/local"
+    .pip_install(
+        "torch>=2.0",
+        "transformers>=4.40",
+        "sentencepiece>=0.2",
+        "protobuf>=3.20",
+        "spacy>=3.7",
+        "fastapi[standard]",
     )
-    .pip_install("ollama>=0.4.0")
-    .env({
-        "OLLAMA_MODELS": "/vol/ollama",
-        "OLLAMA_NUM_PARALLEL": "1",
-        "OLLAMA_MAX_LOADED_MODELS": "1",
-    })
-    .run_commands("python -m compileall -q /usr/local/lib/python3.11")
+    .run_commands("python -m spacy download xx_sent_ud_sm")
+    .env({"HF_HOME": "/vol/models"})
 )
-
-# --- Orchestrator image: lightweight CPU, just fastapi + ML inference deps ---
-orchestrator_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("numpy>=1.26", "scikit-learn==1.3.1", "joblib>=1.3")
-    .pip_install("fastapi[standard]")
-    .run_commands("python -m compileall -q /usr/local/lib/python3.11")
-    .add_local_file("logistic_model.joblib", "/app/logistic_model.joblib")
-)
-
-
-def _start_ollama():
-    """Start Ollama server and wait for it to be ready."""
-    env = os.environ.copy()
-    env["OLLAMA_MODELS"] = "/vol/ollama"
-
-    proc = subprocess.Popen(
-        ["ollama", "serve"],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    for i in range(60):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2)
-            print(f"Ollama ready after {i+1}s")
-            return proc
-        except (urllib.error.URLError, ConnectionRefusedError, TimeoutError, OSError):
-            time.sleep(1)
-
-    if proc.poll() is not None:
-        _, stderr = proc.communicate()
-        raise RuntimeError(f"Ollama crashed: {stderr.decode()}")
-    raise RuntimeError("Ollama failed to start within 60s")
-
-
-def _warmup_model(model: str):
-    """Send a tiny prompt to load model weights into memory."""
-    import ollama  # type: ignore
-    ollama.generate(model=model, prompt="hi", options={"num_predict": 1})
-    print(f"Model {model} preloaded into memory")
-
-
-def _classify(model: str, text: str, prompt: str) -> int:
-    """Run classification with a specific model."""
-    import ollama  # type: ignore
-
-    result = ollama.generate(model=model, prompt=prompt + text, options={"temperature": 0.1})
-    response = result["response"].split("</think>")[-1].strip().lower()
-    matches = get_close_matches(response, BIASES, n=1)
-    return BIAS_TO_NUM[matches[0]] if matches else 0
-
-
-# --- GPU workers ---
-
-@app.cls(
-    image=gpu_image,
-    gpu="L4",
-    volumes={"/vol/ollama": ollama_volume},
-    timeout=300,
-    scaledown_window=180,
-    max_containers=1,
-)
-class GemmaClassifier:
-    @modal.enter()
-    def startup(self):
-        self.proc = _start_ollama()
-        _warmup_model("gemma3:12b")
-
-    @modal.method()
-    def classify(self, text: str, language: str) -> int:
-        prompt = PROMPTS.get(language, PROMPTS["en"])
-        return _classify("gemma3:12b", text, prompt)
-
-
-@app.cls(
-    image=gpu_image,
-    gpu="L4",
-    volumes={"/vol/ollama": ollama_volume},
-    timeout=300,
-    scaledown_window=180,
-    max_containers=1,
-)
-class LlamaClassifier:
-    @modal.enter()
-    def startup(self):
-        self.proc = _start_ollama()
-        _warmup_model("llama3.1:8b")
-
-    @modal.method()
-    def classify(self, text: str, language: str) -> int:
-        prompt = PROMPTS.get(language, PROMPTS["en"])
-        return _classify("llama3.1:8b", text, prompt)
-
-
-@app.cls(
-    image=gpu_image,
-    gpu="L4",
-    volumes={"/vol/ollama": ollama_volume},
-    timeout=300,
-    scaledown_window=180,
-    max_containers=1,
-)
-class QwenClassifier:
-    @modal.enter()
-    def startup(self):
-        self.proc = _start_ollama()
-        _warmup_model("qwen3:8b")
-
-    @modal.method()
-    def classify(self, text: str, language: str) -> int:
-        prompt = PROMPTS.get(language, PROMPTS["en"])
-        return _classify("qwen3:8b", text, prompt)
-
-
-# --- Thin CPU orchestrator: preserves original endpoint URL ---
-
-@app.function(
-    image=orchestrator_image,
-    secrets=[secret],
-    timeout=360,
-    max_containers=1,
-)
-@modal.fastapi_endpoint(method="POST")
-async def analyze(data: dict, authorization: str = Header(default="")):
-    """
-    Classify text for political bias.
-
-    Headers: Authorization: Bearer <api-key>
-    Body: {"text": "...", "language": "sk"}
-    Returns: {"politicalBias": "liberal" | "neutral" | "conservative"}
-    """
-    from fastapi import HTTPException  # type: ignore
-    import numpy as np  # type: ignore
-    from joblib import load  # type: ignore
-
-    expected_key = os.environ.get("API_KEY", "")
-    provided_key = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-    if not expected_key or provided_key != expected_key:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    text = data.get("text", "")
-    language = data.get("language", "sk")
-
-    if not text:
-        raise HTTPException(status_code=400, detail="Missing 'text' field")
-
-    # Spawn all 3 models on their GPU containers in parallel
-    gemma = GemmaClassifier().classify.spawn(text, language)
-    qwen = QwenClassifier().classify.spawn(text, language)
-    llama = LlamaClassifier().classify.spawn(text, language)
-
-    results = [gemma.get(), qwen.get(), llama.get()]
-
-    lr_model = load("/app/logistic_model.joblib")
-    predictions = np.array([results])
-    label = lr_model.predict(predictions)[0]
-
-    return {"politicalBias": NUM_TO_BIAS[label]}
 
 
 @app.function(
-    image=gpu_image,
-    volumes={"/vol/ollama": ollama_volume},
+    image=image,
+    volumes={"/vol/models": models_volume},
     timeout=1800,
 )
 def download_models():
     """Pre-download models. Run once: modal run modal_app.py::download_models"""
-    import ollama  # type: ignore
+    from transformers import (
+        AutoModelForSeq2SeqLM,
+        AutoTokenizer,
+        AutoModelForSequenceClassification,
+    )
 
-    _start_ollama()
+    print("Downloading NLLB translation model...")
+    AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
+    AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
 
-    for model in ["gemma3:12b", "qwen3:8b", "llama3.1:8b"]:
-        print(f"Pulling {model}...")
-        ollama.pull(model)
-        print(f"Done: {model}")
+    print("Downloading Political DEBATE politicalness classifier...")
+    AutoTokenizer.from_pretrained("mlburnham/Political_DEBATE_large_v1.0")
+    AutoModelForSequenceClassification.from_pretrained(
+        "mlburnham/Political_DEBATE_large_v1.0"
+    )
 
-    ollama_volume.commit()
-    print("All models downloaded.")
+    print("Downloading DeBERTa political leaning classifier...")
+    AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
+    AutoModelForSequenceClassification.from_pretrained(
+        "matous-volf/political-leaning-deberta-large"
+    )
+
+    print("Committing models to volume...")
+    models_volume.commit()
+    print("All models downloaded and committed.")
+
+
+@app.cls(
+    image=image,
+    gpu="T4",
+    volumes={"/vol/models": models_volume},
+    secrets=[auth_secret],
+    timeout=300,
+    scaledown_window=180,
+)
+class Analyzer:
+    @modal.enter()
+    def load_models(self):
+        """Load all models into GPU memory at container start."""
+        import torch
+        from transformers import (
+            AutoModelForSeq2SeqLM,
+            AutoTokenizer,
+            pipeline,
+        )
+        import spacy
+
+        print("Loading spaCy sentence splitter...")
+        self.nlp = spacy.load("xx_sent_ud_sm")
+
+        print("Loading NLLB translation model...")
+        self.nllb_tokenizer = AutoTokenizer.from_pretrained(
+            "facebook/nllb-200-distilled-600M"
+        )
+        self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
+            "facebook/nllb-200-distilled-600M"
+        ).to("cuda" if torch.cuda.is_available() else "cpu")
+
+        print("Loading Political DEBATE politicalness classifier...")
+        self.politicalness_pipeline = pipeline(
+            "zero-shot-classification",
+            model="mlburnham/Political_DEBATE_large_v1.0",
+            device=0 if torch.cuda.is_available() else -1,
+        )
+
+        print("Loading DeBERTa political leaning classifier...")
+        self.economic_pipeline = pipeline(
+            "text-classification",
+            model="matous-volf/political-leaning-deberta-large",
+            tokenizer="microsoft/deberta-v3-large",
+            device=0 if torch.cuda.is_available() else -1,
+            truncation=True,
+            max_length=256,
+        )
+
+        print("All models loaded successfully.")
+
+    def translate(self, text: str) -> str:
+        """
+        Translate text to English using NLLB.
+
+        ALWAYS translates to English, even if input is already English.
+        Source language defaults to Slovak (slk_Latn).
+
+        Uses spaCy to split into sentences (NLLB has 512 token limit),
+        translates each sentence individually, then rejoins.
+        """
+        # TODO: add language detection (e.g. fasttext lid) for automatic source language selection
+
+        # Split text into sentences
+        doc = self.nlp(text)
+        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+
+        if not sentences:
+            return text
+
+        translated_sentences = []
+        for sentence in sentences:
+            # Tokenize with source language (Slovak) and target language (English)
+            inputs = self.nllb_tokenizer(
+                sentence,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            ).to(self.nllb_model.device)
+
+            # Generate translation
+            # Slovak: slk_Latn, English: eng_Latn
+            translated_tokens = self.nllb_model.generate(
+                **inputs,
+                forced_bos_token_id=self.nllb_tokenizer.lang_code_to_id["eng_Latn"],
+                max_length=512,
+            )
+
+            translated = self.nllb_tokenizer.batch_decode(
+                translated_tokens, skip_special_tokens=True
+            )[0]
+            translated_sentences.append(translated)
+
+        return " ".join(translated_sentences)
+
+    def check_politicalness(self, text: str) -> bool:
+        """
+        Check if text is political using Political DEBATE NLI classifier.
+
+        Returns True if the text is about politics (score > 0.5), False otherwise.
+        """
+        result = self.politicalness_pipeline(
+            text,
+            candidate_labels=["This text is about politics."],
+            hypothesis_template="{}",
+        )
+
+        # result["scores"][0] is the score for the hypothesis
+        score = result["scores"][0] if result["scores"] else 0.0
+        return score > 0.5
+
+    def classify_economic(self, text: str) -> str:
+        """
+        Classify political leaning on economic axis using DeBERTa.
+
+        Returns: "left", "center", or "right"
+        """
+        result = self.economic_pipeline(text, truncation=True, max_length=256)
+
+        # DeBERTa model outputs: 0 = left, 1 = center, 2 = right
+        # The pipeline returns label as "LABEL_0", "LABEL_1", or "LABEL_2"
+        label = result[0]["label"]
+        label_map = {
+            "LABEL_0": "left",
+            "LABEL_1": "center",
+            "LABEL_2": "right",
+        }
+        return label_map.get(label, "center")
+
+    @modal.fastapi_endpoint(method="POST")
+    async def analyze(self, data: dict, authorization: str = Header(default="")):
+        """
+        Classify text for political content and bias.
+
+        Headers: Authorization: Bearer <api-key>
+        Body: {"text": "..."}
+        Returns: {
+            "politicalness": true/false,
+            "axes": {"economic": "left|center|right"} or {}
+        }
+        """
+        from fastapi import HTTPException
+
+        # Validate authentication
+        expected_key = os.environ.get("API_KEY", "")
+        provided_key = (
+            authorization.replace("Bearer ", "")
+            if authorization.startswith("Bearer ")
+            else authorization
+        )
+        if not expected_key or provided_key != expected_key:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        # Validate input
+        text = data.get("text", "")
+        if not text or not text.strip():
+            raise HTTPException(status_code=400, detail="Missing or empty 'text' field")
+
+        # Step 1: Translate to English (always, even if already English)
+        print("Translating text...")
+        translated_text = self.translate(text)
+        print(f"Translation complete: {translated_text[:100]}...")
+
+        # Step 2: Check politicalness
+        print("Checking politicalness...")
+        is_political = self.check_politicalness(translated_text)
+        print(f"Political: {is_political}")
+
+        # Step 3: If political, classify economic axis
+        axes = {}
+        if is_political:
+            print("Classifying economic axis...")
+            economic_label = self.classify_economic(translated_text)
+            axes["economic"] = economic_label
+            print(f"Economic axis: {economic_label}")
+
+        return {"politicalness": is_political, "axes": axes}
 
 
 @app.local_entrypoint()
 def main():
-    print("Downloading models...")
+    """Local entrypoint for initial model download."""
+    print("Downloading models to volume...")
     download_models.remote()
     print("Done!")
