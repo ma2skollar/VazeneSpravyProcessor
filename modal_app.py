@@ -28,7 +28,7 @@ image = (
         "fastapi[standard]",
     )
     .run_commands("python -m spacy download xx_sent_ud_sm")
-    .env({"HF_HOME": "/vol/models", "HF_HUB_OFFLINE": "1"})
+    .env({"HF_HOME": "/vol/models"})
 )
 
 
@@ -233,6 +233,7 @@ analyzer = None
     secrets=[auth_secret],
     timeout=300,
     scaledown_window=180,
+    env={"HF_HUB_OFFLINE": "1"},
 )
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
