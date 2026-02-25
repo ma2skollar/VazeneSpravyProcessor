@@ -20,6 +20,12 @@ jobs:
       - name: Install Modal
         run: pip install modal
 
+      - name: Download models to Modal volume (prod)
+        run: modal run modal_app.py::download_models
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID_PROD }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET_PROD }}
+
       - name: Deploy to Modal (prod)
         run: modal deploy modal_app.py
         env:
@@ -38,6 +44,12 @@ jobs:
 
       - name: Install Modal
         run: pip install modal
+
+      - name: Download models to Modal volume (test)
+        run: modal run modal_app.py::download_models
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID_TEST }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET_TEST }}
 
       - name: Deploy to Modal (test)
         run: modal deploy modal_app.py
