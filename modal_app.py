@@ -249,6 +249,7 @@ analyzer = None
     timeout=300,
     scaledown_window=180,
     env={"HF_HUB_OFFLINE": "1"},
+    concurrency_limit=1,
 )
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
