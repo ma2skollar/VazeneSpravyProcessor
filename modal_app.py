@@ -1,5 +1,10 @@
 import modal
 import os
+import sys
+
+# Force unbuffered output for Modal logs
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 try:
     from fastapi import Header
@@ -7,6 +12,11 @@ except ImportError:
     # Fallback for local imports (fastapi only available in Modal container)
     def Header(default=""):
         return default
+
+
+def log(msg: str):
+    """Log message with flush for Modal visibility."""
+    print(f"[DIAG] {msg}", flush=True)
 
 app = modal.App("vazenespravy-processor")
 
@@ -117,6 +127,15 @@ class Analyzer:
             local_files_only=True,
         )
 
+        # Log the model's actual label configuration
+        log("=" * 60)
+        log("ECONOMIC MODEL CONFIGURATION:")
+        model_config = self.economic_pipeline.model.config
+        log(f"  id2label: {getattr(model_config, 'id2label', 'NOT FOUND')}")
+        log(f"  label2id: {getattr(model_config, 'label2id', 'NOT FOUND')}")
+        log(f"  num_labels: {getattr(model_config, 'num_labels', 'NOT FOUND')}")
+        log("=" * 60)
+
         print("All models loaded successfully.")
 
     def translate(self, text: str) -> str:
@@ -135,7 +154,10 @@ class Analyzer:
         doc = self.nlp(text)
         sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
 
+        log(f"Translation: Split into {len(sentences)} sentences")
+
         if not sentences:
+            log("Translation: No sentences found, returning original text")
             return text
 
         translated_sentences = []
@@ -154,9 +176,12 @@ class Analyzer:
             # Get the forced BOS token ID for English
             try:
                 forced_bos_token_id = self.nllb_tokenizer.lang_code_to_id["eng_Latn"]
-            except (AttributeError, KeyError):
+                log(f"Translation: Using lang_code_to_id, forced_bos_token_id={forced_bos_token_id}")
+            except (AttributeError, KeyError) as e:
                 # Fallback: convert the language code token to ID
+                log(f"Translation: lang_code_to_id failed ({e}), using convert_tokens_to_ids")
                 forced_bos_token_id = self.nllb_tokenizer.convert_tokens_to_ids("eng_Latn")
+                log(f"Translation: Fallback forced_bos_token_id={forced_bos_token_id}")
 
             translated_tokens = self.nllb_model.generate(
                 **inputs,
@@ -169,13 +194,14 @@ class Analyzer:
             )[0]
             translated_sentences.append(translated)
 
+        log(f"Translation: Completed {len(translated_sentences)} sentences")
         return " ".join(translated_sentences)
 
-    def check_politicalness(self, text: str) -> bool:
+    def check_politicalness(self, text: str) -> tuple[bool, float]:
         """
         Check if text is political using Political DEBATE NLI classifier.
 
-        Returns True if the text is about politics (score > 0.5), False otherwise.
+        Returns tuple of (is_political, score).
         """
         result = self.politicalness_pipeline(
             text,
@@ -183,27 +209,53 @@ class Analyzer:
             hypothesis_template="{}",
         )
 
+        log(f"Politicalness raw result: {result}")
+
         # result["scores"][0] is the score for the hypothesis
         score = result["scores"][0] if result["scores"] else 0.0
-        return score > 0.5
+        is_political = score > 0.5
 
-    def classify_economic(self, text: str) -> str:
+        log(f"Politicalness score: {score}, threshold: 0.5, is_political: {is_political}")
+
+        return is_political, score
+
+    def classify_economic(self, text: str) -> tuple[str, dict]:
         """
         Classify political leaning on economic axis using DeBERTa.
 
-        Returns: "left", "center", or "right"
+        Returns: tuple of (mapped_label, debug_info)
         """
         result = self.economic_pipeline(text, truncation=True, max_length=256)
 
+        log(f"Economic pipeline raw result: {result}")
+
         # DeBERTa model outputs: 0 = left, 1 = center, 2 = right
         # The pipeline returns label as "LABEL_0", "LABEL_1", or "LABEL_2"
-        label = result[0]["label"]
+        raw_label = result[0]["label"]
+        raw_score = result[0]["score"]
+
         label_map = {
             "LABEL_0": "left",
             "LABEL_1": "center",
             "LABEL_2": "right",
         }
-        return label_map.get(label, "center")
+
+        mapped_label = label_map.get(raw_label, "center")
+
+        log(f"Economic classification: raw_label='{raw_label}', score={raw_score}, mapped_to='{mapped_label}'")
+
+        # Check if raw_label was in our map
+        if raw_label not in label_map:
+            log(f"WARNING: Unknown label '{raw_label}' not in label_map, defaulted to 'center'")
+
+        debug_info = {
+            "raw_label": raw_label,
+            "raw_score": raw_score,
+            "mapped_label": mapped_label,
+            "label_was_mapped": raw_label in label_map,
+        }
+
+        return mapped_label, debug_info
 
     def process_text(self, text: str) -> dict:
         """
@@ -217,23 +269,39 @@ class Analyzer:
             "axes": {"economic": "left|center|right"} or {}
         }
         """
+        log("=" * 60)
+        log("STARTING ANALYSIS")
+        log(f"Input text length: {len(text)} chars")
+        log(f"Input text preview: {text[:200]}...")
+
         # Step 1: Translate to English (always, even if already English)
-        print("Translating text...")
+        log("Step 1: Translating text...")
         translated_text = self.translate(text)
-        print(f"Translation complete: {translated_text[:100]}...")
+        log(f"Translated text length: {len(translated_text)} chars")
+        log(f"Translated text preview: {translated_text[:300]}...")
 
         # Step 2: Check politicalness
-        print("Checking politicalness...")
-        is_political = self.check_politicalness(translated_text)
-        print(f"Political: {is_political}")
+        log("Step 2: Checking politicalness...")
+        is_political, pol_score = self.check_politicalness(translated_text)
 
         # Step 3: If political, classify economic axis
         axes = {}
+        economic_debug = None
         if is_political:
-            print("Classifying economic axis...")
-            economic_label = self.classify_economic(translated_text)
+            log("Step 3: Classifying economic axis...")
+            economic_label, economic_debug = self.classify_economic(translated_text)
             axes["economic"] = economic_label
-            print(f"Economic axis: {economic_label}")
+        else:
+            log("Step 3: SKIPPED - text not political, no economic classification")
+
+        # Final summary
+        log("-" * 40)
+        log("ANALYSIS COMPLETE - SUMMARY:")
+        log(f"  politicalness: {is_political} (score: {pol_score})")
+        log(f"  axes: {axes}")
+        if economic_debug:
+            log(f"  economic_debug: {economic_debug}")
+        log("=" * 60)
 
         return {"politicalness": is_political, "axes": axes}
 
