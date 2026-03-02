@@ -125,28 +125,42 @@ class Analyzer:
         ).to("cuda" if torch.cuda.is_available() else "cpu")
 
         print("Loading Political DEBATE politicalness classifier...")
+        # Load model and tokenizer separately to avoid local_files_only leaking into inference
+        from transformers import AutoModelForSequenceClassification
+        politicalness_tokenizer = AutoTokenizer.from_pretrained(
+            "mlburnham/Political_DEBATE_large_v1.0",
+            local_files_only=True,
+        )
+        politicalness_model = AutoModelForSequenceClassification.from_pretrained(
+            "mlburnham/Political_DEBATE_large_v1.0",
+            local_files_only=True,
+        )
         self.politicalness_pipeline = pipeline(
             "zero-shot-classification",
-            model="mlburnham/Political_DEBATE_large_v1.0",
+            model=politicalness_model,
+            tokenizer=politicalness_tokenizer,
             device=0 if torch.cuda.is_available() else -1,
-            local_files_only=True,
         )
 
         print("Loading DeBERTa political leaning classifier...")
+        # Load model and tokenizer separately to avoid local_files_only leaking into inference
         # fix_mistral_regex=True fixes incorrect regex pattern in fast tokenizer
         economic_tokenizer = AutoTokenizer.from_pretrained(
             "microsoft/deberta-v3-large",
             local_files_only=True,
             fix_mistral_regex=True,
         )
+        economic_model = AutoModelForSequenceClassification.from_pretrained(
+            "matous-volf/political-leaning-deberta-large",
+            local_files_only=True,
+        )
         self.economic_pipeline = pipeline(
             "text-classification",
-            model="matous-volf/political-leaning-deberta-large",
+            model=economic_model,
             tokenizer=economic_tokenizer,
             device=0 if torch.cuda.is_available() else -1,
             truncation=True,
             max_length=256,
-            local_files_only=True,
         )
 
         # Log the model's actual label configuration
