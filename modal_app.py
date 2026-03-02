@@ -31,7 +31,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "torch>=2.0",
-        "transformers>=4.40",
+        "transformers>=4.45,<4.48",  # Pin version: >=4.45 has fix_mistral_regex, <4.48 avoids internal bug
         "sentencepiece>=0.2",
         "protobuf>=3.20",
         "spacy>=3.7",
