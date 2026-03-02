@@ -75,9 +75,10 @@ def download_models():
     )
 
     print("Downloading DeBERTa political leaning classifier...")
-    # Download tokenizer from the fine-tuned model itself (not the base model)
+    # Model uses the base DeBERTa tokenizer (not included in fine-tuned model)
+    # Use use_fast=False to avoid regex issues with the fast tokenizer
     AutoTokenizer.from_pretrained(
-        "matous-volf/political-leaning-deberta-large", force_download=True
+        "microsoft/deberta-v3-large", force_download=True, use_fast=False
     )
     AutoModelForSequenceClassification.from_pretrained(
         "matous-volf/political-leaning-deberta-large", force_download=True
@@ -129,10 +130,17 @@ class Analyzer:
         )
 
         print("Loading DeBERTa political leaning classifier...")
+        # Load tokenizer separately with use_fast=False to avoid regex issues
+        from transformers import AutoTokenizer as AT
+        economic_tokenizer = AT.from_pretrained(
+            "microsoft/deberta-v3-large",
+            local_files_only=True,
+            use_fast=False,
+        )
         self.economic_pipeline = pipeline(
             "text-classification",
             model="matous-volf/political-leaning-deberta-large",
-            # Let the pipeline use the model's own tokenizer (don't specify explicitly)
+            tokenizer=economic_tokenizer,
             device=0 if torch.cuda.is_available() else -1,
             truncation=True,
             max_length=256,
