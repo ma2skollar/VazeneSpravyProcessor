@@ -48,28 +48,39 @@ image = (
     timeout=1800,
 )
 def download_models():
-    """Pre-download models. Run once: modal run modal_app.py::download_models"""
+    """Pre-download models. Runs on every deployment to ensure fresh models."""
     from transformers import (
         AutoModelForSeq2SeqLM,
         AutoTokenizer,
         AutoModelForSequenceClassification,
     )
 
+    # force_download=True ensures we always get the latest version from HuggingFace
+    # This is important when model weights or tokenizers are updated
+
     print("Downloading NLLB translation model...")
-    AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M", use_fast=False)
-    AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
+    AutoTokenizer.from_pretrained(
+        "facebook/nllb-200-distilled-600M", use_fast=False, force_download=True
+    )
+    AutoModelForSeq2SeqLM.from_pretrained(
+        "facebook/nllb-200-distilled-600M", force_download=True
+    )
 
     print("Downloading Political DEBATE politicalness classifier...")
-    AutoTokenizer.from_pretrained("mlburnham/Political_DEBATE_large_v1.0")
+    AutoTokenizer.from_pretrained(
+        "mlburnham/Political_DEBATE_large_v1.0", force_download=True
+    )
     AutoModelForSequenceClassification.from_pretrained(
-        "mlburnham/Political_DEBATE_large_v1.0"
+        "mlburnham/Political_DEBATE_large_v1.0", force_download=True
     )
 
     print("Downloading DeBERTa political leaning classifier...")
     # Download tokenizer from the fine-tuned model itself (not the base model)
-    AutoTokenizer.from_pretrained("matous-volf/political-leaning-deberta-large")
+    AutoTokenizer.from_pretrained(
+        "matous-volf/political-leaning-deberta-large", force_download=True
+    )
     AutoModelForSequenceClassification.from_pretrained(
-        "matous-volf/political-leaning-deberta-large"
+        "matous-volf/political-leaning-deberta-large", force_download=True
     )
 
     print("Committing models to volume...")
@@ -318,7 +329,7 @@ analyzer = None
     timeout=300,
     scaledown_window=180,
     env={"HF_HUB_OFFLINE": "1"},
-    concurrency_limit=1,
+    max_containers=1,
 )
 @modal.fastapi_endpoint(method="POST")
 async def analyze(data: dict, authorization: str = Header(default="")):
