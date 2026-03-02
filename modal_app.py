@@ -76,9 +76,11 @@ def download_models():
 
     print("Downloading DeBERTa political leaning classifier...")
     # Model uses the base DeBERTa tokenizer (not included in fine-tuned model)
-    # Use use_fast=False to avoid regex issues with the fast tokenizer
-    AutoTokenizer.from_pretrained(
-        "microsoft/deberta-v3-large", force_download=True, use_fast=False
+    # Use DebertaV2Tokenizer directly to avoid AutoTokenizer regex detection issues
+    # fix_mistral_regex=True fixes incorrect regex pattern warning
+    from transformers import DebertaV2Tokenizer
+    DebertaV2Tokenizer.from_pretrained(
+        "microsoft/deberta-v3-large", force_download=True, fix_mistral_regex=True
     )
     AutoModelForSequenceClassification.from_pretrained(
         "matous-volf/political-leaning-deberta-large", force_download=True
@@ -109,12 +111,15 @@ class Analyzer:
         self.nllb_tokenizer = AutoTokenizer.from_pretrained(
             "facebook/nllb-200-distilled-600M", local_files_only=True, use_fast=False
         )
-        # Suppress tied weights warnings by loading with tie_word_embeddings config
+        # Suppress tied weights warnings - these are informational only
+        # The warning occurs because checkpoint has separate weights but config says to tie them
+        import warnings
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             "facebook/nllb-200-distilled-600M", local_files_only=True
         )
         config.tie_word_embeddings = False
+        warnings.filterwarnings("ignore", message=".*tied weights.*")
         self.nllb_model = AutoModelForSeq2SeqLM.from_pretrained(
             "facebook/nllb-200-distilled-600M",
             local_files_only=True,
@@ -130,12 +135,13 @@ class Analyzer:
         )
 
         print("Loading DeBERTa political leaning classifier...")
-        # Load tokenizer separately with use_fast=False to avoid regex issues
-        from transformers import AutoTokenizer as AT
-        economic_tokenizer = AT.from_pretrained(
+        # Use DebertaV2Tokenizer directly to avoid AutoTokenizer regex detection issues
+        # fix_mistral_regex=True fixes incorrect regex pattern warning
+        from transformers import DebertaV2Tokenizer
+        economic_tokenizer = DebertaV2Tokenizer.from_pretrained(
             "microsoft/deberta-v3-large",
             local_files_only=True,
-            use_fast=False,
+            fix_mistral_regex=True,
         )
         self.economic_pipeline = pipeline(
             "text-classification",
