@@ -66,7 +66,8 @@ def download_models():
     )
 
     print("Downloading DeBERTa political leaning classifier...")
-    AutoTokenizer.from_pretrained("microsoft/deberta-v3-large", trust_remote_code=True)
+    # Download tokenizer from the fine-tuned model itself (not the base model)
+    AutoTokenizer.from_pretrained("matous-volf/political-leaning-deberta-large")
     AutoModelForSequenceClassification.from_pretrained(
         "matous-volf/political-leaning-deberta-large"
     )
@@ -120,7 +121,7 @@ class Analyzer:
         self.economic_pipeline = pipeline(
             "text-classification",
             model="matous-volf/political-leaning-deberta-large",
-            tokenizer="microsoft/deberta-v3-large",
+            # Let the pipeline use the model's own tokenizer (don't specify explicitly)
             device=0 if torch.cuda.is_available() else -1,
             truncation=True,
             max_length=256,
