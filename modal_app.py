@@ -76,10 +76,8 @@ def download_models():
 
     print("Downloading DeBERTa political leaning classifier...")
     # Model uses the base DeBERTa tokenizer (not included in fine-tuned model)
-    # Use DebertaV2Tokenizer directly to avoid AutoTokenizer regex detection issues
-    # fix_mistral_regex=True fixes incorrect regex pattern warning
-    from transformers import DebertaV2Tokenizer
-    DebertaV2Tokenizer.from_pretrained(
+    # fix_mistral_regex=True fixes incorrect regex pattern in fast tokenizer
+    AutoTokenizer.from_pretrained(
         "microsoft/deberta-v3-large", force_download=True, fix_mistral_regex=True
     )
     AutoModelForSequenceClassification.from_pretrained(
@@ -135,10 +133,8 @@ class Analyzer:
         )
 
         print("Loading DeBERTa political leaning classifier...")
-        # Use DebertaV2Tokenizer directly to avoid AutoTokenizer regex detection issues
-        # fix_mistral_regex=True fixes incorrect regex pattern warning
-        from transformers import DebertaV2Tokenizer
-        economic_tokenizer = DebertaV2Tokenizer.from_pretrained(
+        # fix_mistral_regex=True fixes incorrect regex pattern in fast tokenizer
+        economic_tokenizer = AutoTokenizer.from_pretrained(
             "microsoft/deberta-v3-large",
             local_files_only=True,
             fix_mistral_regex=True,
