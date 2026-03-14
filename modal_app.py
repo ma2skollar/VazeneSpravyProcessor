@@ -320,15 +320,12 @@ class Analyzer:
         log("Step 2: Checking politicalness...")
         is_political, pol_score = self.check_politicalness(translated_text)
 
-        # Step 3: If political, classify economic axis
+        # Step 3: Classify economic axis (always, regardless of politicalness)
         axes = {}
         economic_debug = None
-        if is_political:
-            log("Step 3: Classifying economic axis...")
-            economic_label, economic_debug = self.classify_economic(translated_text)
-            axes["economic"] = economic_label
-        else:
-            log("Step 3: SKIPPED - text not political, no economic classification")
+        log("Step 3: Classifying economic axis...")
+        economic_label, economic_debug = self.classify_economic(translated_text)
+        axes["economic"] = economic_label
 
         # Final summary
         log("-" * 40)
